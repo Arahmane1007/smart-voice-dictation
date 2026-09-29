@@ -8,12 +8,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartParser
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from svd_server.auth import KeyVerifier, client_ip, parse_bearer
 from svd_server.body_limit import BodySizeLimitMiddleware, BodyTooLarge, too_large_response
-from svd_server.engine import SAMPLE_RATE, AudioDecodeError, TranscriptionEngine
+from svd_server.engine import (
+    SAMPLE_RATE,
+    AudioDecodeError,
+    AudioTooLongError,
+    TranscriptionEngine,
+)
 from svd_server.errors import openai_error
 from svd_server.limits import QueueFull, SlidingWindowLimiter, TranscriptionQueue
 from svd_server.settings import Settings
@@ -24,6 +30,8 @@ ROUTE = "/v1/audio/transcriptions"
 MULTIPART_OVERHEAD = 64 * 1024
 RESPONSE_FORMATS = {"json", "verbose_json"}
 RETRY_AFTER_SECONDS = "5"
+MAX_FIELD_BYTES = 16 * 1024
+HTTP_ERROR_CODES = {404: "not_found", 405: "method_not_allowed"}
 
 
 def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
@@ -52,6 +60,19 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
 
     app.add_exception_handler(BodyTooLarge, on_body_too_large)
 
+    async def on_http_exception(request: Request, exc: Exception) -> Response:
+        assert isinstance(exc, HTTPException)
+        code = HTTP_ERROR_CODES.get(exc.status_code, "http_error")
+        return openai_error(
+            exc.status_code,
+            str(exc.detail),
+            "invalid_request_error",
+            code,
+            headers=dict(exc.headers) if exc.headers else None,
+        )
+
+    app.add_exception_handler(HTTPException, on_http_exception)
+
     @app.get("/health")
     async def health() -> Response:
         if app.state.ready:
@@ -78,6 +99,14 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
                 },
             )
             return response
+
+        def too_long() -> Response:
+            return openai_error(
+                413,
+                f"Audio longer than {settings.max_audio_seconds} seconds",
+                "invalid_request_error",
+                "audio_too_long",
+            )
 
         ip = client_ip(
             request.client.host if request.client else None,
@@ -108,61 +137,68 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
                 openai_error(429, "Rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
             )
 
-        form = await request.form(max_files=1, max_fields=10)
-        upload = form.get("file")
-        if not isinstance(upload, UploadFile):
-            return done(
-                openai_error(422, "Missing audio file", "invalid_request_error", "missing_file")
-            )
-        response_format = _text_field(form.get("response_format")) or "json"
-        if response_format not in RESPONSE_FORMATS:
-            return done(
-                openai_error(
-                    422,
-                    "response_format must be 'json' or 'verbose_json'",
-                    "invalid_request_error",
-                    "unsupported_response_format",
-                )
-            )
-        language = _text_field(form.get("language"))
-        prompt = _text_field(form.get("prompt"))
-        data = await upload.read()
-        if len(data) > settings.max_upload_bytes:
-            return done(too_large_response())
-
         try:
-            async with queue.slot():
-                audio = await asyncio.to_thread(engine.decode, data)
-                audio_seconds = round(len(audio) / SAMPLE_RATE, 2)
-                if audio_seconds > settings.max_audio_seconds:
-                    return done(
-                        openai_error(
-                            413,
-                            f"Audio longer than {settings.max_audio_seconds} seconds",
-                            "invalid_request_error",
-                            "audio_too_long",
-                        )
+            form = await request.form(max_files=1, max_fields=10, max_part_size=MAX_FIELD_BYTES)
+        except BodyTooLarge:
+            return done(too_large_response())
+        except HTTPException:  # Starlette's MultiPartException, e.g. no boundary, two files
+            return done(
+                openai_error(
+                    400, "Invalid multipart body", "invalid_request_error", "invalid_multipart"
+                )
+            )
+        try:
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                return done(
+                    openai_error(422, "Missing audio file", "invalid_request_error", "missing_file")
+                )
+            response_format = _text_field(form.get("response_format")) or "json"
+            if response_format not in RESPONSE_FORMATS:
+                return done(
+                    openai_error(
+                        422,
+                        "response_format must be 'json' or 'verbose_json'",
+                        "invalid_request_error",
+                        "unsupported_response_format",
                     )
-                transcript = await asyncio.to_thread(engine.transcribe, audio, language, prompt)
-        except QueueFull:
-            return done(
-                openai_error(
-                    503,
-                    "Server busy, retry shortly",
-                    "server_error",
-                    "server_busy",
-                    headers={"Retry-After": RETRY_AFTER_SECONDS},
                 )
-            )
-        except AudioDecodeError:
-            return done(
-                openai_error(
-                    422, "Could not decode audio", "invalid_request_error", "invalid_audio"
+            language = _text_field(form.get("language"))
+            prompt = _text_field(form.get("prompt"))
+            data = await upload.read()
+            if len(data) > settings.max_upload_bytes:
+                return done(too_large_response())
+
+            try:
+                async with queue.slot():
+                    audio = await asyncio.to_thread(engine.decode, data)
+                    audio_seconds = round(len(audio) / SAMPLE_RATE, 2)
+                    if audio_seconds > settings.max_audio_seconds:
+                        return done(too_long())
+                    transcript = await asyncio.to_thread(engine.transcribe, audio, language, prompt)
+            except QueueFull:
+                return done(
+                    openai_error(
+                        503,
+                        "Server busy, retry shortly",
+                        "server_error",
+                        "server_busy",
+                        headers={"Retry-After": RETRY_AFTER_SECONDS},
+                    )
                 )
-            )
-        except Exception as exc:  # never leak internals to the client or the logs
-            logger.error("transcription failed", extra={"svd": {"error": type(exc).__name__}})
-            return done(openai_error(500, "Internal error", "server_error", "internal_error"))
+            except AudioTooLongError:
+                return done(too_long())
+            except AudioDecodeError:
+                return done(
+                    openai_error(
+                        422, "Could not decode audio", "invalid_request_error", "invalid_audio"
+                    )
+                )
+            except Exception as exc:  # never leak internals to the client or the logs
+                logger.error("transcription failed", extra={"svd": {"error": type(exc).__name__}})
+                return done(openai_error(500, "Internal error", "server_error", "internal_error"))
+        finally:
+            await form.close()
 
         if response_format == "json":
             return done(JSONResponse({"text": transcript.text}))

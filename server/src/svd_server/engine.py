@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import av
 import numpy as np
 from faster_whisper import WhisperModel, decode_audio
 
@@ -25,6 +26,10 @@ class AudioDecodeError(Exception):
     """The uploaded bytes are not decodable audio."""
 
 
+class AudioTooLongError(Exception):
+    """The audio container declares a duration above the allowed maximum."""
+
+
 class TranscriptionEngine(Protocol):
     def warmup(self) -> None: ...
 
@@ -35,10 +40,28 @@ class TranscriptionEngine(Protocol):
     ) -> Transcript: ...
 
 
-def decode_audio_bytes(data: bytes) -> np.ndarray:
-    """Decode any audio container to mono float32 at 16 kHz, entirely in memory."""
+def _declared_seconds(data: bytes) -> float | None:
+    """Duration announced by the container, without decoding any sample."""
+    try:
+        with av.open(io.BytesIO(data), mode="r") as container:
+            if container.duration is None:
+                return None
+            return float(container.duration) / av.time_base
+    except Exception:  # undecodable input is reported by the real decode below
+        return None
+
+
+def decode_audio_bytes(data: bytes, max_seconds: float | None = None) -> np.ndarray:
+    """Decode any audio container to mono float32 at 16 kHz, entirely in memory.
+
+    With `max_seconds`, a container declaring a longer duration is rejected before decoding.
+    """
     if not data:
         raise AudioDecodeError("empty audio")
+    if max_seconds is not None:
+        declared = _declared_seconds(data)
+        if declared is not None and declared > max_seconds:
+            raise AudioTooLongError(f"audio longer than {max_seconds} seconds")
     try:
         audio = decode_audio(io.BytesIO(data), sampling_rate=SAMPLE_RATE)
     except Exception as exc:  # PyAV raises many different error types
@@ -55,6 +78,7 @@ class FasterWhisperEngine:
         model_factory: Callable[..., Any] = WhisperModel,
     ) -> None:
         self._beam_size = settings.whisper_beam_size
+        self._max_audio_seconds = settings.max_audio_seconds
         self._model = model_factory(
             settings.whisper_model,
             device="cpu",
@@ -69,7 +93,7 @@ class FasterWhisperEngine:
         list(segments)
 
     def decode(self, data: bytes) -> np.ndarray:
-        return decode_audio_bytes(data)
+        return decode_audio_bytes(data, max_seconds=self._max_audio_seconds)
 
     def transcribe(self, audio: np.ndarray, language: str | None, prompt: str | None) -> Transcript:
         segments, info = self._model.transcribe(

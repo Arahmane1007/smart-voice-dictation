@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.formparsers import MultiPartParser
 from svd_server.app import create_app
 from svd_server.auth import fingerprint
-from svd_server.engine import SAMPLE_RATE, AudioDecodeError, Transcript
+from svd_server.engine import SAMPLE_RATE, AudioDecodeError, AudioTooLongError, Transcript
 from svd_server.settings import Settings
 
 KEY = "k" * 40
@@ -30,6 +30,7 @@ class FakeEngine:
         text: str = SECRET_TEXT,
         seconds: float = 2.0,
         decode_error: bool = False,
+        too_long: bool = False,
         crash: bool = False,
         gate: threading.Event | None = None,
         started: threading.Event | None = None,
@@ -37,6 +38,7 @@ class FakeEngine:
         self.text = text
         self.seconds = seconds
         self.decode_error = decode_error
+        self.too_long = too_long
         self.crash = crash
         self.gate = gate
         self.started = started
@@ -47,6 +49,8 @@ class FakeEngine:
         self.warmed = True
 
     def decode(self, data: bytes) -> np.ndarray:
+        if self.too_long:
+            raise AudioTooLongError("long")
         if self.decode_error:
             raise AudioDecodeError("bad")
         return np.zeros(int(self.seconds * SAMPLE_RATE), dtype=np.float32)
@@ -271,3 +275,62 @@ def test_logs_never_contain_text_or_keys(
     full_log = caplog.text + " ".join(str(r.__dict__) for r in caplog.records)
     assert SECRET_TEXT not in full_log
     assert KEY not in full_log
+
+
+def test_engine_declared_too_long_is_413() -> None:
+    with TestClient(create_app(settings(), FakeEngine(too_long=True))) as client:
+        response = client.post(URL, headers=AUTH, files=audio_file())
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "audio_too_long"
+
+
+def test_two_file_parts_is_400_invalid_multipart(client: TestClient) -> None:
+    files = [
+        ("file", ("a.flac", b"a", "audio/flac")),
+        ("file", ("b.flac", b"b", "audio/flac")),
+    ]
+    response = client.post(URL, headers=AUTH, files=files)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_multipart"
+
+
+def test_multipart_without_boundary_is_400(client: TestClient) -> None:
+    response = client.post(
+        URL, headers={**AUTH, "Content-Type": "multipart/form-data"}, content=b"junk"
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_multipart"
+
+
+def test_unknown_route_is_404_in_openai_format(client: TestClient) -> None:
+    response = client.get("/nope")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_chunked_oversized_upload_is_413() -> None:
+    def body() -> Any:
+        yield b'--b\r\nContent-Disposition: form-data; name="file"; filename="a"\r\n\r\n'
+        for _ in range(4):
+            yield b"x" * (512 * 1024)
+        yield b"\r\n--b--\r\n"
+
+    with TestClient(create_app(settings(max_upload_mb=1), FakeEngine())) as client:
+        response = client.post(
+            URL,
+            headers={**AUTH, "Content-Type": "multipart/form-data; boundary=b"},
+            content=body(),
+        )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "file_too_large"
+
+
+def test_every_request_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="svd_server")
+    with TestClient(create_app(settings(max_upload_mb=1), FakeEngine())) as client:
+        client.post(URL, headers={**AUTH, "Content-Type": "multipart/form-data"}, content=b"j")
+        big = {"file": ("clip.flac", b"x" * (2 * 1024 * 1024), "audio/flac")}
+        client.post(URL, headers=AUTH, files=big)
+    statuses = [r.svd["status"] for r in caplog.records if r.name == "svd_server.access"]  # type: ignore[attr-defined]
+    assert statuses == [400, 413]

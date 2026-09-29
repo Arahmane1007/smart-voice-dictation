@@ -10,6 +10,7 @@ import pytest
 from svd_server.engine import (
     SAMPLE_RATE,
     AudioDecodeError,
+    AudioTooLongError,
     FasterWhisperEngine,
     Transcript,
     decode_audio_bytes,
@@ -37,6 +38,15 @@ def test_decode_wav_at_16k() -> None:
     audio = decode_audio_bytes(make_wav(1.0))
     assert audio.dtype == np.float32
     assert abs(len(audio) - SAMPLE_RATE) < 200
+
+
+def test_declared_duration_above_limit_raises_too_long() -> None:
+    with pytest.raises(AudioTooLongError):
+        decode_audio_bytes(make_wav(3.0), max_seconds=2)
+
+
+def test_declared_duration_below_limit_passes() -> None:
+    assert decode_audio_bytes(make_wav(1.0), max_seconds=2).size > 0
 
 
 def test_decode_resamples_to_16k() -> None:
