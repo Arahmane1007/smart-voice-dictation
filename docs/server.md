@@ -10,6 +10,8 @@ docker run --rm ghcr.io/<owner>/smart-voice-dictation-server svd-server generate
 
 Before the first image is published, generate it from a clone of the repository instead: `uv run svd-server generate-key`.
 
+A newly created GHCR package is **private**. After the first release, the repository owner must open the package on GitHub (*Packages* → `smart-voice-dictation-server` → *Package settings* → *Change visibility* → *Public*); until then, Dokploy and everyone else need registry credentials to pull the image.
+
 Keep it secret: anyone with this key can use your server.
 
 ## 2a. Run it on the same PC
