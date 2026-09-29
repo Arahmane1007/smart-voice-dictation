@@ -38,6 +38,12 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
     # Uploaded files are spooled in memory up to this size: audio never touches the disk.
     MultiPartParser.spool_max_size = settings.max_upload_bytes + MULTIPART_OVERHEAD
 
+    # Behind Traefik/Dokploy a wrong value makes every client share the proxy's IP.
+    logging.getLogger("svd_server").info(
+        "trusted proxies",
+        extra={"svd": {"trusted_proxies": [str(net) for net in settings.trusted_proxies]}},
+    )
+
     verifier = KeyVerifier(settings.api_keys)
     key_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute)
     auth_failures = SlidingWindowLimiter(settings.auth_failures_per_minute)
@@ -113,18 +119,19 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
             request.headers.get("x-forwarded-for"),
             settings.trusted_proxies,
         )
-        if auth_failures.blocked(ip):
-            return done(
-                openai_error(
-                    429,
-                    "Too many failed authentication attempts",
-                    "rate_limit_error",
-                    "auth_rate_limited",
-                )
-            )
-
+        # The key is checked first: a valid key is never blocked by its IP, so a
+        # stranger behind the same NAT (or proxy) cannot lock the owner out.
         key = verifier.verify(parse_bearer(request.headers.get("authorization")))
         if key is None:
+            if auth_failures.blocked(ip):
+                return done(
+                    openai_error(
+                        429,
+                        "Too many failed authentication attempts",
+                        "rate_limit_error",
+                        "auth_rate_limited",
+                    )
+                )
             auth_failures.record(ip)
             return done(
                 openai_error(

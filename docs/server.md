@@ -27,7 +27,8 @@ Plain HTTP is only acceptable on `localhost`; the client refuses it for any othe
 1. Create a **Compose** application pointing to this repository, compose path `server/docker-compose.yml` (or use the published image directly).
 2. In *Environment*, set `API_KEYS=<your-key>` and `GITHUB_OWNER=<owner>`.
 3. In *Domains*, attach your domain to port `8000` with HTTPS enabled (Let's Encrypt).
-4. Set `TRUSTED_PROXIES` to the network of the reverse proxy, so rate limits see the real client IP. With Dokploy, find it with `docker network inspect dokploy-network` (field `Subnet`, e.g. `10.0.1.0/24`).
+4. **Required behind Traefik/Dokploy:** set `TRUSTED_PROXIES` to the network of the reverse proxy, so rate limits see the real client IP. With Dokploy, find it with `docker network inspect dokploy-network` (field `Subnet`, e.g. `10.0.1.0/24`). Without it, every request appears to come from Traefik and all clients share one failed-authentication budget: anyone sending wrong keys gets every other client without a valid key refused (a valid key is always accepted). The value in use is logged at startup (`"event": "trusted proxies"`).
+   To verify it: from your own connection, send `AUTH_FAILURES_PER_MINUTE` + 1 requests with a wrong key (`-H "Authorization: Bearer wrong"`); the last one must return `429`. Then, within the minute, send a wrong key from a different connection (e.g. a phone on mobile data): it must return `401`, not `429`. If it returns `429`, the failures were counted for the proxy's IP and `TRUSTED_PROXIES` is wrong.
 5. On Dokploy the domain is routed by Traefik to container port `8000`, so the published `127.0.0.1:8000:8000` mapping is not needed there; remove it from the Dokploy app if it collides with something else on port 8000.
 6. Deploy, then check: `curl https://your-domain/health` → `ok`.
 
@@ -43,9 +44,9 @@ Plain HTTP is only acceptable on `localhost`; the client refuses it for any othe
 | `MAX_UPLOAD_MB` | `10` | Maximum upload size |
 | `MAX_AUDIO_SECONDS` | `125` | Maximum audio duration |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests per minute and per key |
-| `AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications tolerated per minute and per IP |
+| `AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications tolerated per minute and per IP; beyond it, requests from that IP without a valid key get `429` |
 | `QUEUE_SIZE` | `2` | Requests allowed to wait while one is transcribed |
-| `TRUSTED_PROXIES` | *(empty)* | IPs or networks allowed to set `X-Forwarded-For` |
+| `TRUSTED_PROXIES` | *(empty)* | IPs or networks allowed to set `X-Forwarded-For` (required behind a reverse proxy such as Traefik) |
 | `MEM_LIMIT` | `4g` | Container memory cap (Docker Compose `mem_limit`). The `small` model needs about 1–2 GB; allow more for `medium`/`large-v3` |
 
 ## Rotating a key without downtime

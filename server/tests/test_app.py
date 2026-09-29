@@ -210,14 +210,18 @@ def test_rate_limit_per_key() -> None:
     assert other.status_code == 200
 
 
-def test_auth_failures_block_the_ip_even_with_a_valid_key() -> None:
+def test_auth_failures_block_bad_keys_but_never_a_valid_key() -> None:
     bad = {"Authorization": "Bearer " + "x" * 40}
     with TestClient(create_app(settings(auth_failures_per_minute=3), FakeEngine())) as client:
         failures = [client.post(URL, headers=bad, files=audio_file()).status_code for _ in range(3)]
-        after = client.post(URL, headers=AUTH, files=audio_file())
+        blocked = client.post(URL, headers=bad, files=audio_file())
+        missing = client.post(URL, files=audio_file())
+        valid = client.post(URL, headers=AUTH, files=audio_file())
     assert failures == [401, 401, 401]
-    assert after.status_code == 429
-    assert after.json()["error"]["code"] == "auth_rate_limited"
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "auth_rate_limited"
+    assert missing.status_code == 429
+    assert valid.status_code == 200  # a stranger sharing the IP cannot lock the owner out
 
 
 async def post_from(app: Any, peer: str, headers: dict[str, str]) -> httpx.Response:
@@ -235,16 +239,19 @@ async def test_forwarded_for_is_honoured_only_from_trusted_proxy() -> None:
 
     # Through the trusted proxy, the client 198.51.100.9 fails once and is blocked...
     await post_from(app, "10.0.1.7", {**bad, "X-Forwarded-For": "198.51.100.9"})
-    blocked = await post_from(app, "10.0.1.7", {**AUTH, "X-Forwarded-For": "198.51.100.9"})
+    blocked = await post_from(app, "10.0.1.7", {**bad, "X-Forwarded-For": "198.51.100.9"})
     assert blocked.status_code == 429
     # ...while another client behind the same proxy is not.
-    other = await post_from(app, "10.0.1.7", {**AUTH, "X-Forwarded-For": "198.51.100.10"})
-    assert other.status_code == 200
+    other = await post_from(app, "10.0.1.7", {**bad, "X-Forwarded-For": "198.51.100.10"})
+    assert other.status_code == 401
 
     # A direct, untrusted peer cannot escape its block by forging the header.
     await post_from(app, "203.0.113.5", {**bad, "X-Forwarded-For": "1.1.1.1"})
-    forged = await post_from(app, "203.0.113.5", {**AUTH, "X-Forwarded-For": "2.2.2.2"})
+    forged = await post_from(app, "203.0.113.5", {**bad, "X-Forwarded-For": "2.2.2.2"})
     assert forged.status_code == 429
+    # A valid key is still served from a blocked IP.
+    owner = await post_from(app, "203.0.113.5", {**AUTH, "X-Forwarded-For": "2.2.2.2"})
+    assert owner.status_code == 200
 
 
 async def test_busy_server_returns_503_with_retry_after() -> None:
@@ -334,3 +341,13 @@ def test_every_request_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
         client.post(URL, headers=AUTH, files=big)
     statuses = [r.svd["status"] for r in caplog.records if r.name == "svd_server.access"]  # type: ignore[attr-defined]
     assert statuses == [400, 413]
+
+
+def test_trusted_proxies_are_logged_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="svd_server")
+    create_app(settings(trusted_proxies=(ip_network("10.0.1.0/24"),)), FakeEngine())
+    records = [r for r in caplog.records if r.getMessage() == "trusted proxies"]
+    assert len(records) == 1
+    assert records[0].name == "svd_server"
+    assert records[0].svd == {"trusted_proxies": ["10.0.1.0/24"]}  # type: ignore[attr-defined]
+    assert KEY not in caplog.text + str(records[0].__dict__)
