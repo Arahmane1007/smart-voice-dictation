@@ -8,13 +8,15 @@ The server receives audio, transcribes it with [faster-whisper](https://github.c
 docker run --rm ghcr.io/<owner>/smart-voice-dictation-server svd-server generate-key
 ```
 
+Before the first image is published, generate it from a clone of the repository instead: `uv run svd-server generate-key`.
+
 Keep it secret: anyone with this key can use your server.
 
 ## 2a. Run it on the same PC
 
 ```bash
 cd server
-API_KEYS=<your-key> docker compose up -d
+API_KEYS=<your-key> docker compose up -d --build
 curl http://127.0.0.1:8000/health    # "ok" once the model is loaded
 ```
 
@@ -26,7 +28,8 @@ Plain HTTP is only acceptable on `localhost`; the client refuses it for any othe
 2. In *Environment*, set `API_KEYS=<your-key>` and `GITHUB_OWNER=<owner>`.
 3. In *Domains*, attach your domain to port `8000` with HTTPS enabled (Let's Encrypt).
 4. Set `TRUSTED_PROXIES` to the network of the reverse proxy, so rate limits see the real client IP. With Dokploy, find it with `docker network inspect dokploy-network` (field `Subnet`, e.g. `10.0.1.0/24`).
-5. Deploy, then check: `curl https://your-domain/health` → `ok`.
+5. On Dokploy the domain is routed by Traefik to container port `8000`, so the published `127.0.0.1:8000:8000` mapping is not needed there; remove it from the Dokploy app if it collides with something else on port 8000.
+6. Deploy, then check: `curl https://your-domain/health` → `ok`.
 
 ## Configuration
 
