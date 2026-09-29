@@ -29,8 +29,10 @@ class KeyVerifier:
     def verify(self, token: str | None) -> str | None:
         """Return the fingerprint of the matching key, or None.
 
-        Every configured key is compared in constant time, so the response time
-        does not reveal which key (or how much of it) matched.
+        Every configured key is compared, each with a comparison that is
+        constant-time for tokens of the same length as the key, so the response
+        time does not reveal which key (or how much of it) matched. The length
+        itself may be observable; generated keys all have the same fixed length.
         """
         if token is None:
             return None
