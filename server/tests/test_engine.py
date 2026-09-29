@@ -5,6 +5,7 @@ import wave
 from dataclasses import dataclass
 from typing import Any
 
+import av
 import numpy as np
 import pytest
 from svd_server.engine import (
@@ -52,6 +53,60 @@ def test_declared_duration_below_limit_passes() -> None:
 def test_decode_resamples_to_16k() -> None:
     audio = decode_audio_bytes(make_wav(1.0, rate=44_100))
     assert abs(len(audio) - SAMPLE_RATE) < 200
+
+
+def make_flac(seconds: float, rate: int = SAMPLE_RATE) -> bytes:
+    buffer = io.BytesIO()
+    with av.open(buffer, mode="w", format="flac") as container:
+        stream = container.add_stream("flac", rate=rate, layout="mono")
+        t = np.arange(int(seconds * rate))
+        samples = (8000 * np.sin(2 * np.pi * 440 * t / rate)).astype(np.int16).reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+        frame.sample_rate = rate
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return buffer.getvalue()
+
+
+def hide_flac_duration(data: bytes) -> bytes:
+    """Zero the 36-bit `total samples` field of the FLAC STREAMINFO block.
+
+    Layout: "fLaC" marker (4 bytes), metadata block header (4 bytes), then the
+    34-byte STREAMINFO: min/max block size (2+2 bytes), min/max frame size (3+3),
+    sample rate (20 bits), channels-1 (3 bits), bits per sample-1 (5 bits),
+    total samples (36 bits), MD5 (16 bytes). The total samples field therefore
+    starts at the low nibble of STREAMINFO byte 13 and runs through byte 17.
+    Zero means "unknown", so the container no longer declares any duration.
+    """
+    start = data.find(b"fLaC")
+    assert start >= 0 and data[start + 4] & 0x7F == 0  # first metadata block is STREAMINFO
+    info = start + 8
+    patched = bytearray(data)
+    total = (patched[info + 13] & 0x0F) << 32 | int.from_bytes(patched[info + 14 : info + 18])
+    assert total > 0
+    patched[info + 13] &= 0xF0
+    patched[info + 14 : info + 18] = b"\x00\x00\x00\x00"
+    with av.open(io.BytesIO(bytes(patched)), mode="r") as container:
+        assert container.duration is None  # the declared-duration fast path is blind now
+    return bytes(patched)
+
+
+def test_hidden_duration_is_still_capped_while_decoding() -> None:
+    with pytest.raises(AudioTooLongError):
+        decode_audio_bytes(hide_flac_duration(make_flac(5.0)), max_seconds=2)
+
+
+def test_hidden_duration_short_audio_still_decodes() -> None:
+    audio = decode_audio_bytes(hide_flac_duration(make_flac(1.0)), max_seconds=2)
+    assert audio.dtype == np.float32
+    assert abs(len(audio) - SAMPLE_RATE) < 200
+    assert float(np.max(np.abs(audio))) <= 1.0
+
+
+def test_too_long_is_not_a_decode_error() -> None:
+    assert not issubclass(AudioTooLongError, AudioDecodeError)
 
 
 @pytest.mark.parametrize("data", [b"", b"not audio at all", b"\x00\xff" * 500])

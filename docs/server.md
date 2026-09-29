@@ -46,6 +46,7 @@ Plain HTTP is only acceptable on `localhost`; the client refuses it for any othe
 | `AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications tolerated per minute and per IP |
 | `QUEUE_SIZE` | `2` | Requests allowed to wait while one is transcribed |
 | `TRUSTED_PROXIES` | *(empty)* | IPs or networks allowed to set `X-Forwarded-For` |
+| `MEM_LIMIT` | `4g` | Container memory cap (Docker Compose `mem_limit`). The `small` model needs about 1–2 GB; allow more for `medium`/`large-v3` |
 
 ## Rotating a key without downtime
 

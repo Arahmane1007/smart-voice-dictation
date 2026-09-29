@@ -20,6 +20,7 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - svd-models:/home/svd/.cache/huggingface
+    mem_limit: ${MEM_LIMIT:-4g}
     restart: unless-stopped
 
 volumes:

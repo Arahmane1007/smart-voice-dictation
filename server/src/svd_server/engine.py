@@ -1,5 +1,6 @@
 """Transcription engine: audio decoding and faster-whisper."""
 
+import gc
 import io
 import os
 from collections.abc import Callable
@@ -7,8 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import av
+import av.error
 import numpy as np
-from faster_whisper import WhisperModel, decode_audio
+from av.audio.resampler import AudioResampler
+from faster_whisper import WhisperModel
 
 from svd_server.settings import Settings
 
@@ -51,24 +54,72 @@ def _declared_seconds(data: bytes) -> float | None:
         return None
 
 
+def _stream_decode(data: bytes, max_samples: int | None) -> np.ndarray:
+    """Decode the first audio stream to mono s16 at 16 kHz, frame by frame.
+
+    Samples are counted as they are produced, so a container that hides or lies
+    about its duration is stopped as soon as it exceeds `max_samples`, instead of
+    being decoded (and buffered) in full.
+    """
+    resampler = AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks: list[np.ndarray] = []
+    count = 0
+
+    def keep(frames: list[av.AudioFrame]) -> None:
+        nonlocal count
+        for frame in frames:
+            chunk = frame.to_ndarray().reshape(-1)
+            count += chunk.size
+            if max_samples is not None and count > max_samples:
+                raise AudioTooLongError("audio longer than the allowed maximum")
+            chunks.append(chunk)
+
+    try:
+        with av.open(io.BytesIO(data), mode="r", metadata_errors="ignore") as container:
+            if not container.streams.audio:
+                raise AudioDecodeError("no audio stream")
+            stream = container.streams.audio[0]
+            for packet in container.demux(stream):
+                try:
+                    frames = packet.decode()
+                except av.error.InvalidDataError:
+                    continue  # skip a corrupt packet, like faster-whisper does
+                for frame in frames:
+                    keep(resampler.resample(frame))
+            keep(resampler.resample(None))  # flush the samples buffered by the resampler
+    finally:
+        del resampler
+        gc.collect()  # PyAV resampler objects are otherwise not freed promptly
+
+    if not chunks:
+        raise AudioDecodeError("no audio samples")
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
 def decode_audio_bytes(data: bytes, max_seconds: float | None = None) -> np.ndarray:
     """Decode any audio container to mono float32 at 16 kHz, entirely in memory.
 
-    With `max_seconds`, a container declaring a longer duration is rejected before decoding.
+    With `max_seconds`, a container declaring a longer duration is rejected before
+    decoding, and decoding itself stops as soon as the decoded length exceeds it
+    (the declared duration is attacker-controlled and may be missing or false).
     """
     if not data:
         raise AudioDecodeError("empty audio")
+    max_samples: int | None = None
     if max_seconds is not None:
         declared = _declared_seconds(data)
         if declared is not None and declared > max_seconds:
             raise AudioTooLongError(f"audio longer than {max_seconds} seconds")
+        max_samples = int(max_seconds * SAMPLE_RATE)
     try:
-        audio = decode_audio(io.BytesIO(data), sampling_rate=SAMPLE_RATE)
+        audio = _stream_decode(data, max_samples)
+    except (AudioTooLongError, AudioDecodeError):
+        raise
     except Exception as exc:  # PyAV raises many different error types
         raise AudioDecodeError("could not decode audio") from exc
-    if not isinstance(audio, np.ndarray) or audio.size == 0:
+    if audio.size == 0:
         raise AudioDecodeError("no audio samples")
-    return audio.astype(np.float32, copy=False)
+    return audio
 
 
 class FasterWhisperEngine:
