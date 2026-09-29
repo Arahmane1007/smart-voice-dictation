@@ -1,0 +1,19 @@
+services:
+  svd-server:
+    image: ghcr.io/${GITHUB_OWNER:-your-github-account}/smart-voice-dictation-server:latest
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    environment:
+      API_KEYS: ${API_KEYS:?Set API_KEYS (generate one with `svd-server generate-key`)}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-5}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - svd-models:/home/svd/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  svd-models:

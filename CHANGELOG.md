@@ -7,3 +7,5 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - uv workspace with the `core`, `server` and `client-windows` packages, tooling and CI.
+- Transcription server: OpenAI-compatible `/v1/audio/transcriptions` endpoint, API keys, rate limits, upload and duration caps, single-worker queue, JSON logs without transcribed text.
+- Docker image and release workflow publishing it to GitHub Container Registry.

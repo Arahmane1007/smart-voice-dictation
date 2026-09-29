@@ -11,6 +11,9 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.scripts]
+svd-server = "svd_server.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

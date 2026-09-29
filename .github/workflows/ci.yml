@@ -31,3 +31,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --all-packages --locked
       - run: uv run pytest server/tests
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f server/Dockerfile -t svd-server:ci .
