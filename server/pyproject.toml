@@ -3,7 +3,13 @@ name = "svd-server"
 version = "0.0.0"
 description = "Self-hosted transcription server for Smart Voice Dictation"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.141.1",
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.3",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+]
 
 [build-system]
 requires = ["hatchling"]
