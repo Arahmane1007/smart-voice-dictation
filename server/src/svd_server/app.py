@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from faster_whisper.tokenizer import _LANGUAGE_CODES
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartParser
@@ -32,6 +33,8 @@ RESPONSE_FORMATS = {"json", "verbose_json"}
 RETRY_AFTER_SECONDS = "5"
 MAX_FIELD_BYTES = 16 * 1024
 HTTP_ERROR_CODES = {404: "not_found", 405: "method_not_allowed"}
+# faster-whisper raises ValueError (a 500) on any other code, so reject them up front.
+SUPPORTED_LANGUAGES = frozenset(_LANGUAGE_CODES)
 
 
 def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
@@ -171,6 +174,15 @@ def create_app(settings: Settings, engine: TranscriptionEngine) -> FastAPI:
                     )
                 )
             language = _text_field(form.get("language"))
+            if language is not None and language not in SUPPORTED_LANGUAGES:
+                return done(
+                    openai_error(
+                        422,
+                        "language must be an ISO-639-1 code supported by Whisper (e.g. 'fr')",
+                        "invalid_request_error",
+                        "invalid_language",
+                    )
+                )
             prompt = _text_field(form.get("prompt"))
             data = await upload.read()
             if len(data) > settings.max_upload_bytes:

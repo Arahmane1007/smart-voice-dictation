@@ -351,3 +351,12 @@ def test_trusted_proxies_are_logged_at_startup(caplog: pytest.LogCaptureFixture)
     assert records[0].name == "svd_server"
     assert records[0].svd == {"trusted_proxies": ["10.0.1.0/24"]}  # type: ignore[attr-defined]
     assert KEY not in caplog.text + str(records[0].__dict__)
+
+
+@pytest.mark.parametrize("language", ["fr-FR", "french", "xx"])
+def test_unknown_language_is_422(client: TestClient, engine: FakeEngine, language: str) -> None:
+    response = client.post(URL, headers=AUTH, files=audio_file(), data={"language": language})
+    assert response.status_code == 422
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["code"] == "invalid_language"
+    assert engine.calls == []
