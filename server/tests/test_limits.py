@@ -100,3 +100,54 @@ async def test_queue_frees_slot_when_body_raises() -> None:
             raise RuntimeError("boom")
     async with queue.slot():
         pass
+
+
+def test_one_shot_keys_are_purged_after_the_window() -> None:
+    clock = FakeClock()
+    limiter = SlidingWindowLimiter(limit=5, window_seconds=60, clock=clock)
+    for i in range(100):
+        limiter.record(f"ip-{i}")
+    assert len(limiter) == 100
+    clock.now += 61
+    limiter.record("another")  # any activity after a full window sweeps expired keys
+    assert len(limiter) == 1
+
+
+def test_sweep_runs_at_most_once_per_window() -> None:
+    clock = FakeClock()  # t=1000, the limiter's first sweep is due at t=1060
+    limiter = SlidingWindowLimiter(limit=5, window_seconds=60, clock=clock)
+    limiter.record("a")  # t=1000
+    clock.now += 30
+    limiter.record("b")  # t=1030
+    clock.now += 31
+    limiter.record("c")  # t=1061: sweep, "a" is gone
+    assert limiter.tracked_keys == {"b", "c"}
+    clock.now += 39
+    limiter.record("d")  # t=1100: "b" expired, but the last sweep was 39 s ago
+    assert limiter.tracked_keys == {"b", "c", "d"}
+    clock.now += 21
+    limiter.record("e")  # t=1121: next sweep, "b" and "c" are gone
+    assert limiter.tracked_keys == {"d", "e"}
+
+
+def test_key_cap_evicts_the_least_recently_active_key() -> None:
+    clock = FakeClock()
+    limiter = SlidingWindowLimiter(limit=5, window_seconds=60, clock=clock, max_keys=3)
+    limiter.record("old")
+    clock.now += 1
+    limiter.record("mid")
+    clock.now += 1
+    limiter.record("new")
+    clock.now += 1
+    limiter.record("old")  # "old" is active again, so "mid" is now the stalest key
+    clock.now += 1
+    limiter.record("extra")
+    assert len(limiter) == 3
+    assert limiter.tracked_keys == {"old", "new", "extra"}
+
+
+def test_known_key_is_recorded_even_when_full() -> None:
+    limiter = SlidingWindowLimiter(limit=2, window_seconds=60, clock=FakeClock(), max_keys=1)
+    limiter.record("a")
+    limiter.record("a")
+    assert limiter.blocked("a")
