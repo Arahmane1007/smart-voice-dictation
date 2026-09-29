@@ -33,6 +33,9 @@ addopts = "--import-mode=importlib -m 'not slow'"
 testpaths = ["core/tests", "server/tests", "client-windows/tests"]
 markers = ["slow: tests that download or run real Whisper models"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [dependency-groups]
 dev = [
