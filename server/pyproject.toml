@@ -1,0 +1,22 @@
+[project]
+name = "svd-server"
+version = "0.0.0"
+description = "Self-hosted transcription server for Smart Voice Dictation"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.3",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+svd-server = "svd_server.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/svd_server"]

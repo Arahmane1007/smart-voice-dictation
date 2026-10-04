@@ -1,0 +1,47 @@
+[project]
+name = "smart-voice-dictation"
+version = "0.0.0"
+description = "Workspace root for Smart Voice Dictation"
+readme = "README.md"
+authors = [
+    { name = "Abdourahmane", email = "abdourahmane2526@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["core", "server", "client-windows"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+include = ["core", "server", "client-windows"]
+exclude = ["**/.venv", "**/__pycache__"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib -m 'not slow'"
+testpaths = ["core/tests", "server/tests", "client-windows/tests"]
+markers = ["slow: tests that download or run real Whisper models"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.9",
+]
